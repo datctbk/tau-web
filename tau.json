@@ -1,0 +1,8 @@
+{
+  "name": "tau-web",
+  "version": "0.1.0",
+  "description": "Web tools for tau — fetch URLs, search the web, extract content from pages.",
+  "author": "datctbk",
+  "extensions": ["extensions/web"],
+  "skills": []
+}
