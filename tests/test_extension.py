@@ -74,14 +74,19 @@ class TestToolsRegistration:
         fetch_tool = next(t for t in ext.tools() if t.name == "web_fetch")
         assert "url" in fetch_tool.parameters
 
-    def test_web_fetch_has_extract_param(self, ext):
+    def test_web_fetch_has_prompt_param(self, ext):
         fetch_tool = next(t for t in ext.tools() if t.name == "web_fetch")
-        assert "extract" in fetch_tool.parameters
-        assert fetch_tool.parameters["extract"].required is False
+        assert "prompt" in fetch_tool.parameters
+        assert fetch_tool.parameters["prompt"].required is False
 
     def test_web_search_has_query_param(self, ext):
         search_tool = next(t for t in ext.tools() if t.name == "web_search")
         assert "query" in search_tool.parameters
+
+    def test_web_search_has_domains_params(self, ext):
+        search_tool = next(t for t in ext.tools() if t.name == "web_search")
+        assert "allowed_domains" in search_tool.parameters
+        assert "blocked_domains" in search_tool.parameters
 
     def test_web_search_has_max_results_param(self, ext):
         search_tool = next(t for t in ext.tools() if t.name == "web_search")
@@ -184,7 +189,7 @@ class TestWebFetchHandler:
         assert "404" in result
 
     @patch.object(_mod, "_fetch_url")
-    def test_fetch_with_extract(self, mock_fetch, ext):
+    def test_fetch_with_prompt_no_subagent(self, mock_fetch, ext):
         mock_fetch.return_value = {
             "content": "# Intro\n\nGeneral stuff.\n\n# Installation\n\npip install foo\n\n# Usage\n\nimport foo",
             "status_code": 200,
@@ -195,9 +200,12 @@ class TestWebFetchHandler:
             "was_truncated": False,
             "error": None,
         }
-        result = ext._handle_web_fetch(url="https://example.com", extract="Installation")
+        # Extension is mocked, so hasattr(..., "create_sub_session") will fail 
+        # or be not real unless we mock it. This will test the fallback path.
+        del ext._ext_context.create_sub_session
+        result = ext._handle_web_fetch(url="https://example.com", prompt="Installation")
+        assert "sub-agent capability is not available" in result
         assert "pip install foo" in result
-        assert "Filtered for" in result
 
     @patch.object(_mod, "_fetch_url")
     def test_truncation_noted(self, mock_fetch, ext):

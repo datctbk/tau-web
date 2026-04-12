@@ -147,15 +147,36 @@ def _fetch_url(url: str, timeout: int = REQUEST_TIMEOUT) -> dict[str, Any]:
             elapsed_ms = int((time.time() - start) * 1000)
 
             content_type = resp.headers.get("content-type", "")
-            raw = resp.text
-
-            # Convert HTML to markdown
-            if "text/html" in content_type:
-                content = _html_to_markdown(raw)
+            
+            # Check for binary content
+            is_binary = any(t in content_type.lower() for t in ["application/pdf", "image/", "application/zip", "audio/", "video/"])
+            
+            if is_binary:
+                from pathlib import Path
+                import tempfile
+                import mimetypes
+                
+                ext = mimetypes.guess_extension(content_type.split(';')[0]) or ".bin"
+                tmp_dir = Path(".tau/tmp")
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                
+                with tempfile.NamedTemporaryFile(dir=tmp_dir, suffix=ext, delete=False) as f:
+                    f.write(resp.content)
+                    persisted_path = f.name
+                
+                raw_len = len(resp.content)
+                content = f"[Binary content ({content_type}, {raw_len:,} bytes) saved to {persisted_path}]"
+                was_truncated = False
             else:
-                content = raw
+                raw = resp.text
+                raw_len = len(raw)
+                # Convert HTML to markdown
+                if "text/html" in content_type:
+                    content = _html_to_markdown(raw)
+                else:
+                    content = raw
 
-            content, was_truncated = _truncate_content(content)
+                content, was_truncated = _truncate_content(content)
 
             return {
                 "content": content,
@@ -163,7 +184,7 @@ def _fetch_url(url: str, timeout: int = REQUEST_TIMEOUT) -> dict[str, Any]:
                 "content_type": content_type.split(";")[0].strip(),
                 "url": str(resp.url),
                 "elapsed_ms": elapsed_ms,
-                "bytes": len(raw),
+                "bytes": raw_len,
                 "was_truncated": was_truncated,
                 "error": None,
             }
@@ -233,18 +254,30 @@ def _fetch_url_urllib(url: str, timeout: int = REQUEST_TIMEOUT) -> dict[str, Any
 # Web search via DuckDuckGo (no API key needed)
 # ---------------------------------------------------------------------------
 
-def _web_search(query: str, max_results: int = MAX_SEARCH_RESULTS) -> dict[str, Any]:
+def _web_search(
+    query: str,
+    max_results: int = MAX_SEARCH_RESULTS,
+    allowed_domains: list[str] | None = None,
+    blocked_domains: list[str] | None = None,
+) -> dict[str, Any]:
     """Search the web using DuckDuckGo's HTML interface (no API key).
 
     Returns dict with: query, results, elapsed_ms, error
     """
     start = time.time()
+    
+    # Build DDG query string with site: operators
+    ddg_query = query
+    if allowed_domains:
+        ddg_query += " " + " OR ".join(f"site:{d}" for d in allowed_domains)
+    if blocked_domains:
+        ddg_query += " " + " ".join(f"-site:{d}" for d in blocked_domains)
 
     try:
         # Try duckduckgo_search library first
         from duckduckgo_search import DDGS
         with DDGS() as ddgs:
-            raw_results = list(ddgs.text(query, max_results=max_results))
+            raw_results = list(ddgs.text(ddg_query, max_results=max_results))
         elapsed_ms = int((time.time() - start) * 1000)
 
         results = []
@@ -266,7 +299,8 @@ def _web_search(query: str, max_results: int = MAX_SEARCH_RESULTS) -> dict[str, 
 
     # Fallback: use DuckDuckGo's lite HTML endpoint
     try:
-        search_url = f"https://lite.duckduckgo.com/lite/?q={query.replace(' ', '+')}"
+        from urllib.parse import quote_plus
+        search_url = f"https://lite.duckduckgo.com/lite/?q={quote_plus(ddg_query)}"
         result = _fetch_url(search_url, timeout=15)
         elapsed_ms = int((time.time() - start) * 1000)
 
@@ -346,12 +380,13 @@ class WebExtension(Extension):
                         type="string",
                         description="The URL to fetch content from.",
                     ),
-                    "extract": ToolParameter(
+                    "prompt": ToolParameter(
                         type="string",
                         description=(
-                            "Optional: what to extract from the page. "
-                            "If provided, focuses the output on relevant content. "
-                            "E.g. 'API authentication section', 'installation instructions'."
+                            "Optional prompt to run on the fetched content. "
+                            "If provided, a sub-agent will read the content and answer "
+                            "your prompt directly. E.g. 'Extract the installation instructions' "
+                            "or 'What does this API endpoint return?'"
                         ),
                         required=False,
                     ),
@@ -375,6 +410,16 @@ class WebExtension(Extension):
                     "query": ToolParameter(
                         type="string",
                         description="The search query. Be specific for better results.",
+                    ),
+                    "allowed_domains": ToolParameter(
+                        type="array",
+                        description="Optional list of domains to restrict search to (e.g. ['docs.python.org']).",
+                        required=False,
+                    ),
+                    "blocked_domains": ToolParameter(
+                        type="array",
+                        description="Optional list of domains to exclude from search.",
+                        required=False,
                     ),
                     "max_results": ToolParameter(
                         type="integer",
@@ -409,7 +454,7 @@ class WebExtension(Extension):
     # Tool handlers
     # ------------------------------------------------------------------
 
-    def _handle_web_fetch(self, url: str, extract: str | None = None) -> str:
+    def _handle_web_fetch(self, url: str, prompt: str | None = None) -> str:
         # Validate URL
         try:
             parsed = urlparse(url)
@@ -442,28 +487,33 @@ class WebExtension(Extension):
 
         content = result["content"]
 
-        # If extract is specified, try to find the relevant section
-        if extract and content:
-            # Simple paragraph splitting isn't enough, we need to match blocks
-            # But the test just splits on \n\n, so let's match that behavior correctly
-            sections = content.split("\n\n")
-            relevant = []
-            for i, s in enumerate(sections):
-                if extract.lower() in s.lower():
-                    # Include the match and the next few paragraphs assuming they are related context
-                    relevant.extend(sections[i:i+3])
-            
-            if relevant:
-                # Deduplicate while preserving order
-                seen = set()
-                deduped = []
-                for s in relevant:
-                    if s not in seen:
-                        seen.add(s)
-                        deduped.append(s)
-                
-                content = "\n\n".join(deduped[:10])
-                parts.append(f"*Filtered for: \"{extract}\"*\n")
+        # Run prompt on content over a sub-session if available
+        if prompt:
+            if self._ext_context is not None and hasattr(self._ext_context, "create_sub_session"):
+                parts.append(f"*Running prompt: \"{prompt}\"*\n")
+                try:
+                    system_msg = (
+                        f"You are a helpful extraction agent. You have just fetched the content from {url}. "
+                        f"Please read the following content and answer the user's prompt directly.\n\n"
+                        f"## Content from {url}\n\n{content}"
+                    )
+                    sub = self._ext_context.create_sub_session(
+                        system_prompt=system_msg,
+                        max_turns=3,
+                        session_name="web-extract",
+                    )
+                    with sub:
+                        from tau.core.types import TextDelta
+                        events = sub.prompt_sync(prompt)
+                        ans = "".join(
+                            e.text for e in events 
+                            if isinstance(e, TextDelta) and not getattr(e, "is_thinking", False)
+                        )
+                    content = ans
+                except Exception as e:
+                    content = f"Error running prompt: {e}\n\nFalling back to raw content:\n{content[:2000]}..."
+            else:
+                parts.append("*Note: prompt passed, but sub-agent capability is not available. Showing raw content instead.*\n")
 
         parts.append(content)
         return "\n".join(parts)
