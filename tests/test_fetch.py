@@ -25,6 +25,8 @@ _fetch_url = _mod._fetch_url
 _web_search = _mod._web_search
 _fetch_url_urllib = _mod._fetch_url_urllib
 PREAPPROVED_DOMAINS = _mod.PREAPPROVED_DOMAINS
+_normalize_url = _mod._normalize_url
+_normalize_source_results = _mod._normalize_source_results
 
 
 # ---------------------------------------------------------------------------
@@ -100,3 +102,28 @@ class TestPreapprovedDomains:
 
     def test_unknown_domain_not_preapproved(self):
         assert "evil-site.example.com" not in PREAPPROVED_DOMAINS
+
+
+class TestSourceTrustNormalization:
+    def test_normalize_url_strips_tracking_params(self):
+        u = _normalize_url("https://example.com/docs?a=1&utm_source=x&ref=abc#frag")
+        assert "utm_source" not in u
+        assert "ref=" not in u
+        assert "#" not in u
+        assert "a=1" in u
+
+    def test_normalize_source_results_adds_trust_fields(self):
+        rows = _normalize_source_results([
+            {"title": "Docs", "url": "https://docs.python.org/3/", "snippet": "..."},
+            {"title": "Other", "url": "https://unknown.example.com/page", "snippet": "..."},
+        ])
+        assert rows[0]["trust_tier"] in {"high", "medium", "unknown"}
+        assert "domain" in rows[0]
+        assert "trust_score" in rows[0]
+
+    def test_trusted_sources_sorted_first(self):
+        rows = _normalize_source_results([
+            {"title": "Unknown", "url": "https://unknown.example.com/", "snippet": "..."},
+            {"title": "Python Docs", "url": "https://docs.python.org/3/", "snippet": "..."},
+        ])
+        assert rows[0]["domain"] == "docs.python.org"

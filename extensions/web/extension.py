@@ -19,7 +19,7 @@ import logging
 import re
 import time
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from tau.core.extension import Extension, ExtensionContext
 from tau.core.types import (
@@ -60,6 +60,55 @@ PREAPPROVED_DOMAINS = {
     "docs.aws.amazon.com",
     "api.github.com",
 }
+
+TRUST_HIGH = PREAPPROVED_DOMAINS
+TRUST_MEDIUM = {
+    "medium.com", "dev.to", "news.ycombinator.com", "reddit.com", "www.reddit.com",
+}
+TRACKING_QUERY_PREFIXES = ("utm_", "ref", "fbclid", "gclid", "mc_cid", "mc_eid")
+
+
+def _normalize_url(url: str) -> str:
+    try:
+        p = urlparse(url)
+        query_items = []
+        for k, v in parse_qsl(p.query, keep_blank_values=True):
+            kl = k.lower()
+            if any(kl.startswith(pref) for pref in TRACKING_QUERY_PREFIXES):
+                continue
+            query_items.append((k, v))
+        normalized = urlunparse((p.scheme, p.netloc.lower(), p.path, "", urlencode(query_items), ""))
+        return normalized
+    except Exception:
+        return url
+
+
+def _source_trust(domain: str) -> tuple[str, int]:
+    d = domain.lower()
+    if d in TRUST_HIGH:
+        return "high", 3
+    if d in TRUST_MEDIUM:
+        return "medium", 2
+    return "unknown", 1
+
+
+def _normalize_source_result(item: dict[str, Any]) -> dict[str, Any]:
+    url = str(item.get("url", "")).strip()
+    normalized_url = _normalize_url(url)
+    domain = urlparse(normalized_url).netloc.lower()
+    trust_tier, trust_score = _source_trust(domain)
+    out = dict(item)
+    out["url"] = normalized_url
+    out["domain"] = domain
+    out["trust_tier"] = trust_tier
+    out["trust_score"] = trust_score
+    return out
+
+
+def _normalize_source_results(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = [_normalize_source_result(i) for i in items]
+    normalized.sort(key=lambda r: (r.get("trust_score", 0), r.get("title", "")), reverse=True)
+    return normalized
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +336,7 @@ def _web_search(
                 "url": r.get("href", r.get("link", "")),
                 "snippet": r.get("body", r.get("snippet", "")),
             })
+        results = _normalize_source_results(results)
 
         return {
             "query": query,
@@ -323,6 +373,7 @@ def _web_search(
                 results.append({"title": title.strip(), "url": url, "snippet": ""})
                 if len(results) >= max_results:
                     break
+        results = _normalize_source_results(results)
 
         return {
             "query": query,
@@ -478,6 +529,9 @@ class WebExtension(Extension):
             f"**Content-Type:** {result['content_type']}",
             f"**Size:** {result['bytes']:,} bytes | **Fetched in:** {result['elapsed_ms']}ms",
         ]
+        domain = urlparse(result["url"]).netloc.lower()
+        trust_tier, _ = _source_trust(domain)
+        parts.append(f"**Source:** {domain} (trust: {trust_tier})")
         if result["was_truncated"]:
             parts.append("**Note:** Content was truncated to fit.")
 
@@ -518,12 +572,23 @@ class WebExtension(Extension):
         parts.append(content)
         return "\n".join(parts)
 
-    def _handle_web_search(self, query: str, max_results: int | None = None) -> str:
+    def _handle_web_search(
+        self,
+        query: str,
+        allowed_domains: list[str] | None = None,
+        blocked_domains: list[str] | None = None,
+        max_results: int | None = None,
+    ) -> str:
         if not query or len(query) < 2:
             return "Error: Search query must be at least 2 characters."
 
         n = min(max_results or 5, MAX_SEARCH_RESULTS)
-        result = _web_search(query, max_results=n)
+        result = _web_search(
+            query,
+            max_results=n,
+            allowed_domains=allowed_domains,
+            blocked_domains=blocked_domains,
+        )
 
         if result["error"] and not result["results"]:
             return f"Search error: {result['error']}"
@@ -539,6 +604,7 @@ class WebExtension(Extension):
 
         for i, r in enumerate(result["results"], 1):
             parts.append(f"{i}. **[{r['title']}]({r['url']})**")
+            parts.append(f"   source: {r.get('domain', '')} | trust: {r.get('trust_tier', 'unknown')}")
             if r.get("snippet"):
                 parts.append(f"   {r['snippet']}")
             parts.append("")
