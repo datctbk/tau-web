@@ -14,8 +14,8 @@ tau install git:github.com/datctbk/tau-web
 
 | Tool | Description |
 |------|-------------|
-| `web_fetch` | Fetch content from a URL and automatically convert HTML to markdown. Supports an `extract` parameter to filter large pages to relevant sections. |
-| `web_search` | Search the web for current information (defaults to DuckDuckGo, no API key required). |
+| `web_fetch` | Fetch content from a URL and convert HTML to markdown (supports extraction-focused prompts). |
+| `web_search` | Search the web for current information (DuckDuckGo-style search; no API key required). |
 
 ## Slash Commands
 
@@ -29,6 +29,7 @@ tau install git:github.com/datctbk/tau-web
 - **Content truncation**: Prevents context overflow by automatically truncating massive pages (capped at 100k chars).
 - **Zero dependencies**: Falls back to Python's standard library (`urllib`, regex) if external packages like `httpx` and `html2text` aren't installed.
 - **Pre-approved domains**: Safe domains like `docs.python.org` and `github.com` bypass confirmation checks in interactive mode.
+- **Extension-first design**: Keep web access out of tau core unless always-on behavior is required.
 
 ## Testing
 
