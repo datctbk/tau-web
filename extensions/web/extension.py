@@ -168,6 +168,32 @@ def _truncate_content(text: str, max_length: int = MAX_CONTENT_LENGTH) -> tuple[
         truncated = truncated[:last_break]
     return truncated + f"\n\n... (truncated — original was {len(text):,} chars)", True
 
+# ---------------------------------------------------------------------------
+# Helper: url_safety dynamically loaded
+# ---------------------------------------------------------------------------
+
+_is_safe_url_fn = None
+
+def _get_is_safe_url():
+    """Dynamically load is_safe_url to support tau's dynamic extension loading."""
+    global _is_safe_url_fn
+    if _is_safe_url_fn is not None:
+        return _is_safe_url_fn
+        
+    try:
+        from .url_safety import is_safe_url
+        _is_safe_url_fn = is_safe_url
+    except ImportError:
+        import os
+        import importlib.util
+        path = os.path.join(os.path.dirname(__file__), "url_safety.py")
+        spec = importlib.util.spec_from_file_location("tau_web_url_safety", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _is_safe_url_fn = mod.is_safe_url
+        
+    return _is_safe_url_fn
+
 
 # ---------------------------------------------------------------------------
 # HTTP fetcher
@@ -178,6 +204,19 @@ def _fetch_url(url: str, timeout: int = REQUEST_TIMEOUT) -> dict[str, Any]:
 
     Returns dict with keys: content, status_code, content_type, url, elapsed_ms, error
     """
+    is_safe_url = _get_is_safe_url()
+    if not is_safe_url(url):
+        return {
+            "content": "",
+            "status_code": 0,
+            "content_type": "",
+            "url": url,
+            "elapsed_ms": 0,
+            "bytes": 0,
+            "was_truncated": False,
+            "error": "URL blocked by safety policy (resolves to private/internal IP)",
+        }
+
     try:
         import httpx
         client_cls = httpx.Client
@@ -255,6 +294,20 @@ def _fetch_url_urllib(url: str, timeout: int = REQUEST_TIMEOUT) -> dict[str, Any
     """Fallback URL fetcher using stdlib urllib."""
     import urllib.request
     import urllib.error
+    
+    is_safe_url = _get_is_safe_url()
+
+    if not is_safe_url(url):
+        return {
+            "content": "",
+            "status_code": 0,
+            "content_type": "",
+            "url": url,
+            "elapsed_ms": 0,
+            "bytes": 0,
+            "was_truncated": False,
+            "error": "URL blocked by safety policy (resolves to private/internal IP)",
+        }
 
     start = time.time()
     try:
