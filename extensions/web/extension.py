@@ -377,7 +377,7 @@ def _web_search(
 
     try:
         # Try duckduckgo_search library first
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
         with DDGS() as ddgs:
             raw_results = list(ddgs.text(ddg_query, max_results=max_results))
         elapsed_ms = int((time.time() - start) * 1000)
